@@ -1,6 +1,9 @@
 // Initialize PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
+// Initialize PDF Processor
+const pdfProcessor = new PDFProcessor();
+
 // DOM Elements
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
@@ -58,23 +61,10 @@ async function processFile(file) {
         showStatus('Reading PDF file...', 'success');
         
         const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
-        
-        showStatus('Processing PDF content...', 'success');
-        
-        // Process all pages
-        const textContent = [];
-        for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
-            const content = await page.getTextContent();
-            textContent.push(...content.items.map(item => item.str));
-        }
-
-        // Parse the content
-        const parsedData = parseScheduleData(textContent);
+        const processedData = await pdfProcessor.processPDF(arrayBuffer);
         
         // Display preview
-        showPreview(parsedData);
+        showPreview(processedData);
         
         // Enable download
         downloadBtn.style.display = 'block';
@@ -86,57 +76,76 @@ async function processFile(file) {
     }
 }
 
-// Parse Schedule Data
-function parseScheduleData(textContent) {
-    // Join all text content
-    const text = textContent.join(' ');
-    
-    // Initialize data structure
-    const scheduleData = {
-        activities: [],
-        headers: ['Activity ID', 'Activity Name', 'Original Duration', 'Remaining Duration', 'Start', 'Finish']
-    };
-
-    // Split into lines and process
-    const lines = text.split(/\\n/);
-    let currentActivity = {};
-    
-    for (const line of lines) {
-        // Look for activity patterns
-        if (line.match(/^[A-Z0-9-]+\s/)) {
-            if (Object.keys(currentActivity).length > 0) {
-                scheduleData.activities.push(currentActivity);
-            }
-            currentActivity = parseLine(line);
-        }
-    }
-
-    return scheduleData;
-}
-
-// Parse individual line
-function parseLine(line) {
-    const parts = line.trim().split(/\s+/);
-    return {
-        activityId: parts[0],
-        activityName: parts.slice(1, -4).join(' '),
-        originalDuration: parts[parts.length - 4],
-        remainingDuration: parts[parts.length - 3],
-        start: parts[parts.length - 2],
-        finish: parts[parts.length - 1]
-    };
-}
-
 // Preview Data
 function showPreview(data) {
     preview.style.display = 'block';
+    preview.innerHTML = ''; // Clear previous content
+
+    // Create tabs for different views
+    const tabContainer = document.createElement('div');
+    tabContainer.className = 'tab-container';
     
-    // Create preview table
+    const flatViewTab = createTab('Flat View', true);
+    const hierarchyViewTab = createTab('Hierarchy View', false);
+    
+    tabContainer.appendChild(flatViewTab);
+    tabContainer.appendChild(hierarchyViewTab);
+    preview.appendChild(tabContainer);
+
+    // Create content containers
+    const flatViewContent = createTabContent('flat-view', true);
+    const hierarchyViewContent = createTabContent('hierarchy-view', false);
+    
+    // Create and populate tables
+    const flatTable = createDataTable(data.headers, data.activities);
+    flatViewContent.appendChild(flatTable);
+
+    const hierarchyTable = createHierarchyTable(data.groupedActivities);
+    hierarchyViewContent.appendChild(hierarchyTable);
+
+    preview.appendChild(flatViewContent);
+    preview.appendChild(hierarchyViewContent);
+
+    // Add tab switching functionality
+    flatViewTab.addEventListener('click', () => switchTab('flat-view'));
+    hierarchyViewTab.addEventListener('click', () => switchTab('hierarchy-view'));
+}
+
+function createTab(text, isActive) {
+    const tab = document.createElement('button');
+    tab.className = `tab ${isActive ? 'active' : ''}`;
+    tab.textContent = text;
+    return tab;
+}
+
+function createTabContent(id, isActive) {
+    const content = document.createElement('div');
+    content.id = id;
+    content.className = `tab-content ${isActive ? 'active' : ''}`;
+    return content;
+}
+
+function switchTab(tabId) {
+    const tabs = document.querySelectorAll('.tab');
+    const contents = document.querySelectorAll('.tab-content');
+    
+    tabs.forEach(tab => tab.classList.remove('active'));
+    contents.forEach(content => content.classList.remove('active'));
+    
+    const selectedTab = document.querySelector(`.tab:nth-child(${tabId === 'flat-view' ? '1' : '2'})`);
+    const selectedContent = document.getElementById(tabId);
+    
+    selectedTab.classList.add('active');
+    selectedContent.classList.add('active');
+}
+
+function createDataTable(headers, data) {
     const table = document.createElement('table');
+    table.className = 'data-table';
     
     // Add headers
     const headerRow = document.createElement('tr');
-    data.headers.forEach(header => {
+    headers.forEach(header => {
         const th = document.createElement('th');
         th.textContent = header;
         headerRow.appendChild(th);
@@ -144,34 +153,85 @@ function showPreview(data) {
     table.appendChild(headerRow);
     
     // Add data rows
-    data.activities.forEach(activity => {
-        const row = document.createElement('tr');
-        Object.values(activity).forEach(value => {
+    data.forEach(row => {
+        const tr = document.createElement('tr');
+        headers.forEach(header => {
             const td = document.createElement('td');
-            td.textContent = value;
-            row.appendChild(td);
+            td.textContent = row[header] || '';
+            tr.appendChild(td);
         });
-        table.appendChild(row);
+        table.appendChild(tr);
     });
     
-    preview.innerHTML = '';
-    preview.appendChild(table);
+    return table;
+}
+
+function createHierarchyTable(groupedData) {
+    const table = document.createElement('table');
+    table.className = 'hierarchy-table';
+    
+    // Add headers
+    const headers = ['Activity ID', 'Activity Name', 'Duration', 'Start', 'Finish'];
+    const headerRow = document.createElement('tr');
+    headers.forEach(header => {
+        const th = document.createElement('th');
+        th.textContent = header;
+        headerRow.appendChild(th);
+    });
+    table.appendChild(headerRow);
+    
+    // Add grouped data
+    Object.entries(groupedData).forEach(([groupId, group]) => {
+        // Add main activity
+        const mainRow = createActivityRow(group.main, 'main-activity');
+        table.appendChild(mainRow);
+        
+        // Add sub-activities
+        group.subActivities.forEach(subActivity => {
+            const subRow = createActivityRow(subActivity, 'sub-activity');
+            table.appendChild(subRow);
+        });
+    });
+    
+    return table;
+}
+
+function createActivityRow(activity, className) {
+    const tr = document.createElement('tr');
+    tr.className = className;
+    
+    const cells = [
+        activity['Activity ID'],
+        activity['Activity Name'],
+        activity['Original Duration'],
+        activity['Start'],
+        activity['Finish']
+    ];
+    
+    cells.forEach(cellText => {
+        const td = document.createElement('td');
+        td.textContent = cellText || '';
+        tr.appendChild(td);
+    });
+    
+    return tr;
 }
 
 // Handle Download
 function handleDownload() {
-    // Convert data to CSV
-    const previewTable = preview.querySelector('table');
-    const rows = Array.from(previewTable.querySelectorAll('tr'));
+    const activeView = document.querySelector('.tab-content.active');
+    const table = activeView.querySelector('table');
     
+    // Convert table to CSV
+    const rows = Array.from(table.querySelectorAll('tr'));
     const csvContent = rows.map(row => {
         return Array.from(row.cells)
-            .map(cell => `"${cell.textContent}"`)
+            .map(cell => `"${cell.textContent.replace(/"/g, '""')}"`)
             .join(',');
-    }).join('\\n');
+    }).join('\n');
     
     // Create and trigger download
-    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.style.display = 'none';
